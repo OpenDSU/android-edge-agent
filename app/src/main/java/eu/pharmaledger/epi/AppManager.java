@@ -2,12 +2,12 @@ package eu.pharmaledger.epi;
 
 import android.Manifest;
 import android.content.Context;
+import android.content.ContextWrapper;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.AssetManager;
 import android.content.res.Resources;
-import android.os.Process;
 import android.util.Log;
 import android.webkit.GeolocationPermissions;
 import android.webkit.PermissionRequest;
@@ -17,17 +17,11 @@ import android.webkit.WebView;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
-import androidx.annotation.NonNull;
 import androidx.core.content.ContextCompat;
 
-import com.google.gson.Gson;
-
-import java.io.File;
 import java.io.IOException;
 import java.text.MessageFormat;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
 
 public class AppManager {
     public static final String NODEJS_PROJECT_FOLDER_NAME = "nodejs-project";
@@ -45,10 +39,6 @@ public class AppManager {
 
     private final FileService fileService = new FileService();
     private final String nodeJsFolderPath;
-    private final String webserverFolderPath;
-
-    private final File nodeJsFolder;
-    private final File libsFolder;
 
     public AppManager(MainActivity mainActivity, Context applicationContext, Resources resources) {
         this.mainActivity = mainActivity;
@@ -56,45 +46,16 @@ public class AppManager {
         this.resources = resources;
 
         nodeJsFolderPath = applicationContext.getFilesDir().getAbsolutePath() + "/" + NODEJS_PROJECT_FOLDER_NAME;
-        webserverFolderPath = nodeJsFolderPath + "/" + WEBSERVER_FOLDER_NAME;
 
-        nodeJsFolder = new File(nodeJsFolderPath);
-
-        String libsFolderDir = applicationContext.getFilesDir().getAbsolutePath() + "/libs";
-        libsFolder = new File(libsFolderDir);
-    }
-
-    public String getNodeJsFolderPath() {
-        return nodeJsFolderPath;
-    }
-
-    public String getWebserverFolderPath() {
-        return webserverFolderPath;
-    }
-
-    public File getNodeJsFolder() {
-        return nodeJsFolder;
     }
 
     public void setupInstallation() {
         Log.d(TAG, "APK updated. Trigger re-installation of node asset folder");
-
         long t1 = System.currentTimeMillis();
-
-        //Recursively delete any existing nodejs-project.
-        if (nodeJsFolder.exists()) {
-            fileService.deleteFolderRecursively(nodeJsFolder);
-        }
-        nodeJsFolder.mkdirs();
+        fileService.copyApplicationAssets(applicationContext.getAssets(), nodeJsFolderPath);
 
         long t2 = System.currentTimeMillis();
-        Log.d(TAG, "Deletion of folder took: " + (t2 - t1) + " ms");
-
-        copyApplicationAssets();
-        copyNodeJsDependencyLibs();
-
-        long t3 = System.currentTimeMillis();
-        Log.d(TAG, "Assets copy took: " + (t3 - t2) + " ms");
+        Log.d(TAG, "Assets copy took: " + (t2 - t1) + " ms");
 
         saveLastUpdateTime();
     }
@@ -110,57 +71,8 @@ public class AppManager {
         }
 
         String indexPage = isStandaloneIndexFilePresent ? STANDALONE_INDEX_RELATIVE_PATH : TRUSTLOADER_INDEX_RELATIVE_PATH;
-        return MessageFormat.format("http://localhost:{0}/{1}", String.valueOf(nodePort), indexPage);
-    }
-
-    public void cleanPidFile() {
-        String apidFilePath = webserverFolderPath + "/pid";
-        File apidFile = new File(apidFilePath);
-        if (apidFile.exists()) {
-            if (!apidFile.delete()) {
-                Log.i(TAG, "Could not delete pid file");
-            }
-        }
-    }
-
-    public void waitUntilPidFileCreation() {
-        int currentPid = Process.myPid();
-        while (true) {
-            try {
-                Thread.sleep(1000);
-                //Let's see what we got
-                String apidFilePath = webserverFolderPath + "/pid";
-                File apidFile = new File(apidFilePath);
-                if (apidFile.exists()) {
-                    String data = fileService.getFileContent(apidFilePath);
-                    try {
-                        int apid = Integer.parseInt(data.trim());
-                        if (apid == currentPid) {
-                            break;
-                        }
-                    } catch (NumberFormatException nfex) {
-                        Log.w(TAG, "APID is not an integer: " + nfex);
-                    }
-                }
-
-                Log.d(TAG, "APID Monitor scan done.");
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            }
-        }
-    }
-
-    public boolean wasAPKUpdated() {
-        SharedPreferences prefs = applicationContext.getSharedPreferences("NODEJS_MOBILE_PREFS", Context.MODE_PRIVATE);
-        long previousLastUpdateTime = prefs.getLong("NODEJS_MOBILE_APK_LastUpdateTime", 0);
-        long lastUpdateTime = 1;
-        try {
-            PackageInfo packageInfo = applicationContext.getPackageManager().getPackageInfo(applicationContext.getPackageName(), 0);
-            lastUpdateTime = packageInfo.lastUpdateTime;
-        } catch (PackageManager.NameNotFoundException e) {
-            e.printStackTrace();
-        }
-        return (lastUpdateTime != previousLastUpdateTime);
+        String portSection = nodePort == 80 ? "" : ":" + nodePort;
+        return MessageFormat.format("http://localhost{0}/{1}", portSection, indexPage);
     }
 
     public void saveLastUpdateTime() {
@@ -177,9 +89,9 @@ public class AppManager {
         editor.commit();
     }
 
-    public void initialiseWebView(WebView webView, int port, String mainUrl, AssetManager assetManager) {
+    public void initialiseWebView(WebView webView, int port, String mainUrl, AssetManager assetManager, Resources resources, ContextWrapper contextWrapper) {
         //Enable inner navigation for WebView
-        webView.setWebViewClient(new InnerWebViewClient(port, mainUrl, assetManager));
+        webView.setWebViewClient(new InnerWebViewClient(webView, port, mainUrl, assetManager, resources, contextWrapper));
 
         //Enable JavaScript for WebView
         WebSettings webSettings = webView.getSettings();
@@ -194,7 +106,7 @@ public class AppManager {
             private String geolocationOrigin;
             private GeolocationPermissions.Callback geolocationCallback;
             final ActivityResultLauncher<String[]> locationPermissionRequest =
-                    mainActivity.registerForActivityResult(new ActivityResultContracts
+                    AppManager.this.mainActivity.registerForActivityResult(new ActivityResultContracts
                                     .RequestMultiplePermissions(), result -> {
                                 Boolean fineLocationGranted = result.getOrDefault(
                                         Manifest.permission.ACCESS_FINE_LOCATION, false);
@@ -215,7 +127,7 @@ public class AppManager {
 
             private PermissionRequest request;
             final ActivityResultLauncher<String> getPermission =
-                    mainActivity.registerForActivityResult(new ActivityResultContracts.RequestPermission(), isGranted -> {
+                    AppManager.this.mainActivity.registerForActivityResult(new ActivityResultContracts.RequestPermission(), isGranted -> {
                         if (isGranted) {
                             request.grant(request.getResources());
                         } else {
@@ -275,58 +187,6 @@ public class AppManager {
         WebView.setWebContentsDebuggingEnabled(true);
     }
 
-    private void copyApplicationAssets() {
-        try {
-            String[] rootFiles = applicationContext.getAssets().list(NODEJS_PROJECT_FOLDER_NAME);
-            for (String rootFile : rootFiles) {
-                if (!rootFile.equalsIgnoreCase(WEBSERVER_FOLDER_NAME)) {
-                    fileService.copyAssetFolder(applicationContext.getAssets(),
-                            NODEJS_PROJECT_FOLDER_NAME + "/" + rootFile, nodeJsFolderPath + "/" + rootFile);
-                }
-            }
-
-            new File(webserverFolderPath).mkdirs();
-            String[] apihubRootFiles = applicationContext.getAssets().list(WEBSERVER_RELATIVE_PATH);
-            for (String apihubRootFile : apihubRootFiles) {
-                if (!apihubRootFile.equalsIgnoreCase("app")) {
-                    String relativeFilePath = WEBSERVER_RELATIVE_PATH + "/" + apihubRootFile;
-                    String[] folderFiles = applicationContext.getAssets().list(relativeFilePath);
-                    if (folderFiles.length != 0) {
-                        // current entry is a folder
-                        new File(webserverFolderPath + "/" + apihubRootFile).mkdirs();
-                    }
-
-                    fileService.copyAssetFolder(applicationContext.getAssets(),
-                            relativeFilePath, webserverFolderPath + "/" + apihubRootFile);
-                }
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to copy assets folder", e);
-            throw new RuntimeException(e);
-        }
-    }
-
-    private void copyNodeJsDependencyLibs() {
-        try {
-            String libSourceFolder = getLibSourceFolder();
-            fileService.copyAssetFolder(applicationContext.getAssets(), libSourceFolder, libsFolder.getAbsolutePath());
-
-            String symlinksFileContent = fileService.getAssetContent(applicationContext.getAssets(), "symlinks.json");
-            Gson gson = new Gson();
-            SymlinkConfig[] symlinkConfigArray = gson.fromJson(symlinksFileContent, SymlinkConfig[].class);
-            List<SymlinkConfig> symlinkConfigs = new ArrayList<>(Arrays.asList(symlinkConfigArray));
-
-            for (SymlinkConfig symlinkConfig : symlinkConfigs) {
-                String symlinkPath = libsFolder.getAbsolutePath() + "/" + symlinkConfig.getSymlinkName();
-                String originalFilePath = libsFolder.getAbsolutePath() + "/" + symlinkConfig.getOriginalFile();
-                SystemUtils.createSymLink(symlinkPath, originalFilePath);
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to copy assets folder", e);
-            throw new RuntimeException(e);
-        }
-    }
-
     private boolean hasPermission(String permission) {
         Log.i(TAG, MessageFormat.format("Checking for {0} permission.", permission));
         if (ContextCompat.checkSelfPermission(mainActivity, permission) != PackageManager.PERMISSION_GRANTED) {
@@ -335,21 +195,5 @@ public class AppManager {
         }
 
         return true;
-    }
-
-    @NonNull
-    private String getLibSourceFolder() {
-        String architecture = System.getProperty("os.arch");
-        String libSourceFolder;
-        if ("aarch64".equalsIgnoreCase(architecture)) {
-            libSourceFolder = "arm64-v8a";
-        } else if ("x86_64".equalsIgnoreCase(architecture)) {
-            libSourceFolder = "x86_64";
-        } else if ("i686".equalsIgnoreCase(architecture)) {
-            libSourceFolder = "x86";
-        } else {
-            libSourceFolder = "armeabi-v7a";
-        }
-        return libSourceFolder;
     }
 }
