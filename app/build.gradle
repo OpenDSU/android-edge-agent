@@ -1,6 +1,7 @@
 import java.nio.file.Files
 
 apply plugin: 'com.android.application'
+apply plugin: 'kotlin-android'
 
 task checkSigningFiles(){
     def jksDefaultFilePath = "app/epi.jks.default"
@@ -75,7 +76,7 @@ android {
     sourceSets {
         main {
             jni.srcDirs = [] //disable automatic ndk-build call
-            jniLibs.srcDirs = ['libs']
+            jniLibs.srcDirs = []
         }
     }
     compileOptions {
